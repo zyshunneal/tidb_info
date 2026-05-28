@@ -1,0 +1,123 @@
+# =============================================================================
+# TiDB v7.5.x LTS / arm64 / 3 节点 PoC / 每台 1024MB 内存极致裁剪
+# 目标主机:
+#   debian1  192.168.56.11   PD + TiKV + TiDB + Monitor + Grafana + Alertmanager
+#   debian2  192.168.56.12   PD + TiKV + TiDB
+#   debian3  192.168.56.13   PD + TiKV
+#
+# 部署命令 (在 macOS 控制端):
+#   tiup cluster check  ./tidb-topology.yaml -u tidb -i ~/.ssh/id_rsa_tidb
+#   tiup cluster deploy mytidb v7.5.1 ./tidb-topology.yaml -u tidb -i ~/.ssh/id_rsa_tidb
+#   tiup cluster start  mytidb --init
+#
+# 警告: 1GB/节点 仅适合 PoC, 任何稍大查询都可能 OOM-kill TiKV/TiDB
+# =============================================================================
+
+global:
+  user: "tidb"
+  group: "tidb"
+  ssh_port: 22
+  deploy_dir: "/tidb-deploy"
+  data_dir:   "/tidb-data"
+  log_dir:    "/tidb-deploy/log"
+  arch: "arm64"
+  os: "linux"
+
+monitored:
+  node_exporter_port: 9100
+  blackbox_exporter_port: 9115
+  deploy_dir: "/tidb-deploy/monitored-9100"
+  data_dir:   "/tidb-data/monitored-9100"
+  log_dir:    "/tidb-deploy/monitored-9100/log"
+
+# ============== 极致裁剪：把每个组件的内存/线程占用压到最低 ==============
+server_configs:
+  tidb:
+    mem-quota-query: 268435456                     # 单 query 上限 256MB
+    performance.server-memory-quota: 536870912     # TiDB 进程软上限 512MB
+    performance.txn-total-size-limit: 104857600    # 单事务总大小上限 100MB
+    performance.run-auto-analyze: false            # 关自动 ANALYZE 省内存
+    log.level: "warn"
+    tikv-client.grpc-connection-count: 1
+    tikv-client.max-batch-size: 32
+
+  tikv:
+    storage.block-cache.capacity: "150MiB"         # 默认 45% 内存, 1GB VM 必须硬限
+    raftstore.apply-pool-size: 1
+    raftstore.store-pool-size: 1
+    raftstore.raft-base-tick-interval: "2s"
+    raftstore.raft-heartbeat-ticks: 6
+    raftstore.raft-election-timeout-ticks: 50
+    readpool.unified.max-thread-count: 2
+    readpool.storage.use-unified-pool: true
+    readpool.coprocessor.use-unified-pool: true
+    server.grpc-concurrency: 2
+    # grpc-keepalive-time 必须 ≥ 2 × (raft-base-tick-interval × raft-heartbeat-ticks)
+    # = 2 × 2s × 6 = 24s, 这里给 30s 留余量
+    server.grpc-keepalive-time: "30s"
+    server.grpc-keepalive-timeout: "10s"
+    rocksdb.max-background-jobs: 2
+    rocksdb.max-sub-compactions: 1
+    rocksdb.defaultcf.write-buffer-size: "32MiB"
+    rocksdb.defaultcf.max-write-buffer-number: 2
+    rocksdb.writecf.write-buffer-size: "32MiB"
+    rocksdb.writecf.max-write-buffer-number: 2
+    rocksdb.lockcf.write-buffer-size: "16MiB"
+    raftdb.defaultcf.write-buffer-size: "32MiB"
+    raftdb.defaultcf.max-write-buffer-number: 2
+    log.level: "warn"
+
+  pd:
+    replication.max-replicas: 3
+    schedule.leader-schedule-limit: 4
+    schedule.region-schedule-limit: 64
+    schedule.replica-schedule-limit: 32
+    schedule.merge-schedule-limit: 8
+    log.level: "warn"
+
+# ============== 组件实例 ==============
+pd_servers:
+  - host: 192.168.56.11
+    name: "pd-1"
+    client_port: 2379
+    peer_port: 2380
+  - host: 192.168.56.12
+    name: "pd-2"
+    client_port: 2379
+    peer_port: 2380
+  - host: 192.168.56.13
+    name: "pd-3"
+    client_port: 2379
+    peer_port: 2380
+
+tidb_servers:
+  - host: 192.168.56.11
+    port: 4000
+    status_port: 10080
+  - host: 192.168.56.12
+    port: 4000
+    status_port: 10080
+
+tikv_servers:
+  - host: 192.168.56.11
+    port: 20160
+    status_port: 20180
+  - host: 192.168.56.12
+    port: 20160
+    status_port: 20180
+  - host: 192.168.56.13
+    port: 20160
+    status_port: 20180
+
+monitoring_servers:
+  - host: 192.168.56.11
+    port: 9090
+
+grafana_servers:
+  - host: 192.168.56.11
+    port: 3000
+
+alertmanager_servers:
+  - host: 192.168.56.11
+    web_port: 9093
+    cluster_port: 9094
